@@ -1,0 +1,31 @@
+# Cloudflare Worker behind https://status.prismonic.com
+# Edit src/worker.js, push to main, GitHub Actions deploys via wrangler.
+
+name = "prismonic-status"
+main = "src/worker.js"
+compatibility_date = "2025-05-01"
+workers_dev = false
+
+# Shared state across cron ticks: history samples + last-known UP/DOWN map.
+# Namespace was created via the API on 2026-06-14; ID is stable.
+[[kv_namespaces]]
+binding = "STATUS_KV"
+id = "604bc9944f48428486826c4fbb80e721"
+
+# MVP cadence — every 5 minutes. Bump to "* * * * *" when traffic + KV
+# write budget can absorb 1 sample/min (1,440/day vs free-tier 1k/day cap).
+[triggers]
+crons = ["*/5 * * * *"]
+
+# Bound to status.prismonic.com via Cloudflare's Workers Domains feature;
+# the route below makes Wrangler aware of it so `wrangler deploy` from CI
+# doesn't try to publish to a workers.dev subdomain.
+[[routes]]
+pattern = "status.prismonic.com"
+custom_domain = true
+
+# Secrets (NOT committed):
+#   ALERT_ENDPOINT  — https://api.v3.prismonic.com/api/v1/internal/status-alert
+#   ALERT_SECRET    — shared with the V3 backend's STATUS_ALERT_SECRET env
+# Set once via Cloudflare dashboard OR `wrangler secret put <NAME>`.
+# Once set they survive subsequent `wrangler deploy` calls.

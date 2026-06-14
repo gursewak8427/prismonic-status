@@ -1,0 +1,14 @@
+{
+  "name": "prismonic-status",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cloudflare Worker behind status.prismonic.com — health checks + branded uptime page + email alerts.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^3.95.0"
+  }
+}
