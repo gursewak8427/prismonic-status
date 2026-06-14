@@ -436,27 +436,84 @@ export default {
     await env.STATUS_KV.put(key, JSON.stringify({ at, results }), {
       expirationTtl: 60 * 60 * 24 * 7,
     });
-    const prevState = (await env.STATUS_KV.get("state:last", { type: "json" })) || null;
-    const nextState = {};
-    for (const r of results) nextState[r.id] = r.ok;
-    await env.STATUS_KV.put("state:last", JSON.stringify(nextState));
-    if (!prevState) return;
+
+    // ── Debounced state diff ─────────────────────────────────────────────
+    // Single 5-min flap (Cloudflare bot challenge, transient 5xx, ICMP
+    // route blip) used to fire an immediate down + recovery email pair
+    // and spam the team. Now require ALERT_THRESHOLD consecutive checks
+    // in the candidate state before flipping `confirmed` and emitting
+    // alerts. With threshold=2 and a 5-min cron, a state change has to
+    // persist for ≥10 minutes before anyone hears about it.
+    //
+    // KV shape:
+    //   { confirmed: { [id]: bool }, candidate: { [id]: { ok, count } } }
+    // The old shape was a bare `{ [id]: bool }`. We migrate it on read by
+    // treating the whole object as `confirmed` and dropping candidates —
+    // no orphan KV writes.
+    const ALERT_THRESHOLD = 2;
+    const stored = (await env.STATUS_KV.get("state:last", { type: "json" })) || null;
+    let confirmed = {};
+    let candidate = {};
+    if (stored && typeof stored === "object") {
+      if (stored.confirmed && typeof stored.confirmed === "object") {
+        confirmed = { ...stored.confirmed };
+        candidate = (stored.candidate && typeof stored.candidate === "object")
+          ? { ...stored.candidate }
+          : {};
+      } else {
+        // Legacy bare-map shape — treat as confirmed, no pending candidates.
+        confirmed = { ...stored };
+      }
+    }
+
     const changes = [];
+    const firstSeen = Object.keys(confirmed).length === 0;
     for (const r of results) {
-      const wasUp = prevState[r.id];
-      if (wasUp === undefined) continue;
-      if (wasUp !== r.ok) {
+      const prevConfirmed = confirmed[r.id];
+      if (prevConfirmed === undefined) {
+        // First time we see this service — adopt its state directly so we
+        // don't fire a bogus "transitioned from undefined" alert on rollout.
+        confirmed[r.id] = r.ok;
+        delete candidate[r.id];
+        continue;
+      }
+      if (r.ok === prevConfirmed) {
+        // Current state matches the confirmed state — clear any pending
+        // candidate (it was a transient blip on the way back to normal).
+        delete candidate[r.id];
+        continue;
+      }
+      // Current state disagrees with confirmed. Either advance the existing
+      // candidate or start a fresh one.
+      const c = candidate[r.id];
+      let count = 1;
+      if (c && c.ok === r.ok) count = (Number(c.count) || 0) + 1;
+      if (count >= ALERT_THRESHOLD) {
         const svc = SERVICES.find((s) => s.id === r.id);
         changes.push({
           service: svc?.name || r.id,
           id: r.id,
           url: svc?.url || "",
-          previousState: wasUp ? "up" : "down",
+          previousState: prevConfirmed ? "up" : "down",
           newState: r.ok ? "up" : "down",
           reason: r.reason || "",
         });
+        confirmed[r.id] = r.ok;
+        delete candidate[r.id];
+      } else {
+        candidate[r.id] = { ok: r.ok, count };
       }
     }
+
+    await env.STATUS_KV.put(
+      "state:last",
+      JSON.stringify({ confirmed, candidate })
+    );
+
+    // First-ever rollout: KV was empty, we just populated `confirmed` from
+    // the very first sample. Don't try to derive alerts from no history.
+    if (firstSeen) return;
+
     if (changes.length && env.ALERT_ENDPOINT && env.ALERT_SECRET) {
       try {
         await fetch(env.ALERT_ENDPOINT, {
