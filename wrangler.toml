@@ -17,12 +17,11 @@ id = "604bc9944f48428486826c4fbb80e721"
 [triggers]
 crons = ["*/5 * * * *"]
 
-# Bound to status.prismonic.com via Cloudflare's Workers Domains feature;
-# the route below makes Wrangler aware of it so `wrangler deploy` from CI
-# doesn't try to publish to a workers.dev subdomain.
-[[routes]]
-pattern = "status.prismonic.com"
-custom_domain = true
+# The custom domain `status.prismonic.com` was bound once via Cloudflare's
+# Workers Domains API and survives every deploy — wrangler doesn't need
+# to (and shouldn't) try to re-manage it. `workers_dev = false` above
+# keeps the workers.dev subdomain disabled so traffic only flows in via
+# the bound custom domain.
 
 # Secrets (NOT committed):
 #   ALERT_ENDPOINT  — https://api.v3.prismonic.com/api/v1/internal/status-alert
