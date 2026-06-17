@@ -159,15 +159,26 @@ async function runAll() {
 async function readHistory(env) {
   const out = {};
   for (const svc of SERVICES) out[svc.id] = [];
+  // CF Workers cap simultaneous subrequests at ~50 — `Promise.all` on a
+  // full list page of 1000 keys used to work when we had only a handful of
+  // history entries but blew up once the KV grew past ~250 docs and every
+  // page hit returned 1101 "Worker threw exception". Now we chunk reads
+  // into batches well under the simultaneous cap.
+  const READ_CHUNK = 25;
   let cursor;
   let pages = 0;
   do {
     const list = await env.STATUS_KV.list({ prefix: "h:", limit: 1000, cursor });
-    const docs = await Promise.all(list.keys.map((k) => env.STATUS_KV.get(k.name, { type: "json" })));
-    for (const doc of docs) {
-      if (!doc) continue;
-      for (const r of doc.results || []) {
-        if (out[r.id]) out[r.id].push({ ok: r.ok, ms: r.ms, at: doc.at });
+    for (let i = 0; i < list.keys.length; i += READ_CHUNK) {
+      const batch = list.keys.slice(i, i + READ_CHUNK);
+      const docs = await Promise.all(
+        batch.map((k) => env.STATUS_KV.get(k.name, { type: "json" }))
+      );
+      for (const doc of docs) {
+        if (!doc) continue;
+        for (const r of doc.results || []) {
+          if (out[r.id]) out[r.id].push({ ok: r.ok, ms: r.ms, at: doc.at });
+        }
       }
     }
     cursor = list.list_complete ? undefined : list.cursor;
