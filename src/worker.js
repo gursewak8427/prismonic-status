@@ -156,9 +156,14 @@ async function runAll() {
   return Promise.all(SERVICES.map(runCheck));
 }
 
-async function readHistory(env) {
+function emptyHistory() {
   const out = {};
   for (const svc of SERVICES) out[svc.id] = [];
+  return out;
+}
+
+async function readHistory(env) {
+  const out = emptyHistory();
   // CF Workers cap simultaneous subrequests at ~50 — `Promise.all` on a
   // full list page of 1000 keys used to work when we had only a handful of
   // history entries but blew up once the KV grew past ~250 docs and every
@@ -434,24 +439,20 @@ export default {
         { headers: { "content-type": "application/json", "cache-control": "no-store" } }
       );
     }
-    try {
-      const [results, history] = await Promise.all([runAll(), readHistory(env)]);
-      return new Response(renderPage(results, history), {
-        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store, max-age=0" },
-      });
-    } catch (e) {
-      // Surface the actual stack rather than letting CF render its generic
-      // 1101 "Worker threw exception". 200 here is OK because the request
-      // was handled — the page just couldn't render. Lets us inspect what
-      // broke from a plain curl.
-      return new Response(
-        `Worker error:\n${(e && e.stack) || String(e)}`,
-        {
-          status: 200,
-          headers: { "content-type": "text/plain; charset=utf-8" },
-        }
-      );
-    }
+    // Serve the page off a pre-computed `cache:history` snapshot rather
+    // than re-running readHistory() on every request. The list() call has
+    // a 1,000/day free-tier cap, and one bored crawler can spend that
+    // budget by lunchtime — once exceeded, the worker throws 1101 on
+    // every page load. The cron writes this snapshot once per tick (every
+    // 5 min), which is plenty fresh for a per-day uptime grid.
+    const [results, cachedHistory] = await Promise.all([
+      runAll(),
+      env.STATUS_KV.get("cache:history", { type: "json" }),
+    ]);
+    const history = cachedHistory || emptyHistory();
+    return new Response(renderPage(results, history), {
+      headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store, max-age=0" },
+    });
   },
 
   async scheduled(event, env, ctx) {
@@ -461,6 +462,17 @@ export default {
     await env.STATUS_KV.put(key, JSON.stringify({ at, results }), {
       expirationTtl: 60 * 60 * 24 * 7,
     });
+
+    // Refresh the page's history snapshot once per tick. The fetch handler
+    // serves off this cache (a single .get per page hit) instead of
+    // hammering list() — which has a 1,000/day free-tier cap that crawlers
+    // can blow through by lunchtime.
+    try {
+      const history = await readHistory(env);
+      await env.STATUS_KV.put("cache:history", JSON.stringify(history));
+    } catch (e) {
+      console.log("history cache refresh failed:", e && e.message);
+    }
 
     // ── Debounced state diff ─────────────────────────────────────────────
     // Single 5-min flap (Cloudflare bot challenge, transient 5xx, ICMP
