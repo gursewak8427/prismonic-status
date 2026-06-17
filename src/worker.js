@@ -434,10 +434,24 @@ export default {
         { headers: { "content-type": "application/json", "cache-control": "no-store" } }
       );
     }
-    const [results, history] = await Promise.all([runAll(), readHistory(env)]);
-    return new Response(renderPage(results, history), {
-      headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store, max-age=0" },
-    });
+    try {
+      const [results, history] = await Promise.all([runAll(), readHistory(env)]);
+      return new Response(renderPage(results, history), {
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store, max-age=0" },
+      });
+    } catch (e) {
+      // Surface the actual stack rather than letting CF render its generic
+      // 1101 "Worker threw exception". 200 here is OK because the request
+      // was handled — the page just couldn't render. Lets us inspect what
+      // broke from a plain curl.
+      return new Response(
+        `Worker error:\n${(e && e.stack) || String(e)}`,
+        {
+          status: 200,
+          headers: { "content-type": "text/plain; charset=utf-8" },
+        }
+      );
+    }
   },
 
   async scheduled(event, env, ctx) {
